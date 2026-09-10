@@ -1,0 +1,15 @@
+*.jks
+*.keystore
+*.b64
+keystore/
+keystore.properties
+storepass.txt
+keypass.txt
+local.properties
+app/upload-keystore.jks
+.gradle/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/

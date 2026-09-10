@@ -1,0 +1,143 @@
+name: Android Cloud Build
+
+"on":
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.gradle"
+      - "**/*.gradle.kts"
+      - "**/gradle.properties"
+      - "**/settings.gradle*"
+      - "**/app/**"
+      - ".github/workflows/android-cloud-build.yml"
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: "17"
+  GRADLE_VERSION: "9.3.1"
+
+jobs:
+  build-debug-apk:
+    name: Build Android APK and AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          # NEVER android-37: platforms;android-37 does not exist in the stable
+          # sdkmanager channel and the workflow fails. compileSdk/targetSdk = 36.
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "platforms;android-35" \
+            "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Create Gradle wrapper when missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f gradlew ]]; then
+            gradle wrapper \
+              --gradle-version "$GRADLE_VERSION" \
+              --distribution-type bin
+          fi
+          chmod +x gradlew
+
+      - name: Decode upload keystore (fail fast when secrets missing)
+        shell: bash
+        env:
+          UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
+          UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
+          UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${UPLOAD_KEYSTORE_BASE64:-}" || -z "${UPLOAD_KEYSTORE_PASSWORD:-}" || -z "${UPLOAD_KEY_ALIAS:-}" ]]; then
+            echo "ERROR: signing secrets missing (UPLOAD_KEYSTORE_BASE64 / UPLOAD_KEYSTORE_PASSWORD / UPLOAD_KEY_ALIAS)."
+            echo "Add them under repo Settings > Secrets and variables > Actions, then re-run."
+            exit 1
+          fi
+          # printf, NEVER echo: echo corrupts the keystore with newlines.
+          printf '%s' "$UPLOAD_KEYSTORE_BASE64" | base64 --decode > app/upload-keystore.jks
+          # Verify the decoded keystore is a real JKS, generic AND alias-specific.
+          keytool -list -keystore app/upload-keystore.jks -storepass "$UPLOAD_KEYSTORE_PASSWORD" >/dev/null
+          keytool -list -keystore app/upload-keystore.jks -storepass "$UPLOAD_KEYSTORE_PASSWORD" -alias "$UPLOAD_KEY_ALIAS" >/dev/null
+          echo "Keystore decoded and verified."
+
+      - name: Run tests and build debug APK
+        shell: bash
+        run: ./gradlew --no-daemon --stacktrace clean testDebugUnitTest assembleDebug
+
+      - name: Build signed release AAB for Play Console
+        shell: bash
+        env:
+          UPLOAD_KEYSTORE_PATH: ${{ github.workspace }}/app/upload-keystore.jks
+          UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
+          UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+          UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "Building signed release AAB with sample AdMob IDs (OK for closed testing)"
+          ./gradlew --no-daemon --stacktrace bundleRelease \
+            -PADMOB_APP_ID=ca-app-pub-3940256099942544~3347511713 \
+            -PADMOB_BANNER_ID=ca-app-pub-3940256099942544/6300978111
+
+      - name: Verify AAB signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          aab=$(find app/build/outputs/bundle/release -name '*.aab' | head -n 1)
+          if [[ -z "$aab" ]]; then echo "No AAB produced"; exit 1; fi
+          jarsigner -verify "$aab"
+          ls -lh "$aab"
+          sha256sum "$aab"
+
+      - name: Upload installable APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: |
+            **/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload release AAB
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aab
+          path: |
+            **/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 14
