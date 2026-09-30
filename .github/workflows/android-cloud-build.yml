@@ -107,10 +107,10 @@ jobs:
           UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          echo "Building signed release AAB with sample AdMob IDs (OK for closed testing)"
+          echo "Building signed PRODUCTION AAB with real AdMob IDs"
           ./gradlew --no-daemon --stacktrace bundleRelease \
-            -PADMOB_APP_ID=ca-app-pub-3940256099942544~3347511713 \
-            -PADMOB_BANNER_ID=ca-app-pub-3940256099942544/6300978111
+            -PADMOB_APP_ID=ca-app-pub-7487667838741597~4513413855 \
+            -PADMOB_BANNER_ID=ca-app-pub-7487667838741597/4362379778
 
       - name: Verify AAB signature
         shell: bash
